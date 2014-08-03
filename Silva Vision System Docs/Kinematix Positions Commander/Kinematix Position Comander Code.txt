@@ -1,0 +1,1250 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using System.IO.Ports;
+using System.IO;
+using JoytickInterop;
+using KinematiXRobot;
+using VisionRecognition;
+
+namespace KinematiX
+{
+    public partial class frmKXMain : Form
+    {
+        KinematiXHandler kinematix;
+        SDLJoystick joy;
+        ObjectRecognizer cam;
+        RobotRunMode Runmode = RobotRunMode.Idle;
+
+        private int[] TempAngleEncoders = new int[6];
+        private bool LoadingSeq = false;
+        private bool AddingPos = false;
+        private bool Sending = false;
+
+        public frmKXMain()
+        {
+            InitializeComponent();
+
+            joy = new SDLJoystick();
+            UpdateCommunications();
+
+            TempAngleEncoders[0] = 0;
+            TempAngleEncoders[1] = 0;
+            TempAngleEncoders[2] = 0;
+            TempAngleEncoders[3] = 0;
+            TempAngleEncoders[4] = 0;
+            TempAngleEncoders[5] = 0;
+
+        }
+
+        private void UpdateCommunications()
+        {
+            /* Update Serial Ports*/
+            string[] ports = SerialPort.GetPortNames();
+            foreach (string port in ports)
+                cboxPorts.Items.Add(port);
+            //cboxPorts.SelectedIndex = 1;
+
+            /*Update Joysticks*/
+            numJoy.Maximum = SDLJoystick.NumJoysticks - 1;
+            
+        }
+        private void UpdateGUI()
+        { 
+            if(kinematix != null)
+            {
+                if(kinematix.IsOpen)
+                {
+                    lblSerialStatus.Text = "Online";
+                    lblSerialStatus.ForeColor = Color.Green;
+                    
+                    cboxMoveMode.Enabled = true;
+                    cboxMoveMode.SelectedIndex = 0;
+
+                    cboxPorts.Enabled = false;
+                    btnRefreshCom.Enabled = false;
+                    btnConnectCom.Enabled = false;
+                    txtBaud.Enabled = false;
+                    btnChangeMode.Enabled = true;
+
+                    if (Runmode == RobotRunMode.JogMode)
+                    {
+                        grpJogManual.Enabled = true;
+                        tmrJogUpdater.Enabled = true;
+                        chkUseJoy.Enabled = true;
+                    }
+                    else
+                    {
+                        grpJogManual.Enabled = false;
+                        tmrJogUpdater.Enabled = false;
+                        chkUseJoy.Enabled = false;
+                    }
+
+                    if (Runmode == RobotRunMode.SequenceMode)
+                    {
+                        grpPosControl.Enabled = true;
+                        grpSeqControl.Enabled = true;
+                        grpSeqManager.Enabled = false;
+                        dataGridView1.ReadOnly = true;
+                        btnDeletePos.Enabled = false;
+                        btnDuplicatePos.Enabled = false;
+                    }
+                    else
+                    {
+                        grpPosControl.Enabled = false;
+                        grpSeqControl.Enabled = false;
+                        grpSeqManager.Enabled = true;
+                        dataGridView1.ReadOnly = false;
+                        btnDeletePos.Enabled = true;
+                        btnDuplicatePos.Enabled = true;
+                    }
+
+                }
+            }
+            if(joy.Open)
+            {
+                lblJoyStatus.Text = "Online";
+                lblJoyStatus.ForeColor = Color.Green;
+
+                grpJoyStick.Enabled = true;
+                numJoy.Enabled = false;
+                btnConnectJoy.Enabled = false;
+                btnRefreshJoy.Enabled = false;
+            }
+        }
+        private bool CheckAllPositions()
+        {
+            bool ret = false;
+            if (dataGridView1.Rows.Count == 1)
+                return true;
+
+            for(int j= 0; j< dataGridView1.Rows.Count -1; j++)
+            {
+                int leng;
+                DataGridViewRow row = dataGridView1.Rows[j];
+                for (int i = 2; i <= 5; i++)
+                {
+                    leng = row.Cells[2].Value.ToString().Length;
+                    if (leng == 0)
+                    {
+                        MessageBox.Show("Check The position #" + row.Index.ToString(), "Position Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        ret = false;
+                        return ret;
+                    }
+
+                }
+            }
+            return true;
+        }
+        private void ConvertPositions()
+        {
+
+            kinematix.Sequence.Clear(); 
+            for (int i = 0; i < dataGridView1.Rows.Count - 1; i++)
+            {
+                DataGridViewRow row = dataGridView1.Rows[i];
+                kinematix.Sequence.Add(new RobotMove(row));
+            }
+        }
+
+        #region Communications Methods
+        private void btnRefresh_Click(object sender, EventArgs e)
+        {
+            UpdateCommunications();
+        }
+        private void btnConnectCom_Click(object sender, EventArgs e)
+        {
+            if (cboxPorts.SelectedItem == null)
+                return;
+
+            kinematix = new KinematiXHandler(cboxPorts.SelectedItem.ToString(), Convert.ToInt32(txtBaud.Text),10000);
+            kinematix.AddConsoleHandler(ref txtConsole);
+            UpdateGUI();
+        }
+        private void tmrStatusUpdater_Tick(object sender, EventArgs e)
+        {
+            if (kinematix == null)
+                return;
+
+            lblRobotStatus.Text = kinematix.Status.ToString();
+
+            if (kinematix.Status == RobotStatus.Moving)
+            {
+                btnGoHome.Enabled = false;
+                btnMovePosition.Enabled = false;
+                if (Runmode == RobotRunMode.SequenceMode)
+                    grpSeqControl.Enabled = false;
+            }
+            else
+            {
+                btnGoHome.Enabled = true;
+                btnMovePosition.Enabled = true;
+                if (Runmode == RobotRunMode.SequenceMode)
+                    grpSeqControl.Enabled = true;
+            }
+        }
+        private void btnConnectJoy_Click(object sender, EventArgs e)
+        {
+            joy.InitJoystick((int)numJoy.Value, 12);
+
+            UpdateGUI();
+        }
+        private void btnChangeMode_Click(object sender, EventArgs e)
+        {
+
+            switch (cboxMoveMode.SelectedIndex)
+            {
+                case 0:
+                    Runmode = RobotRunMode.Idle;
+                    cboxMoveMode.SelectedIndex = 1;
+                    MessageBox.Show("Run Mode Changed to Idle", "Run mode", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    break;
+                case 1:
+                    Runmode = RobotRunMode.JogMode;
+                    cboxMoveMode.SelectedIndex = 2;
+                    MessageBox.Show("Run Mode Changed to Jog Mode", "Run mode", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    tabControl1.TabIndex = 0;
+                    break;
+                case 2:
+                    if (CheckAllPositions())
+                    {
+                        Runmode = RobotRunMode.SequenceMode;
+                        cboxMoveMode.SelectedIndex = 2;
+                        ConvertPositions();
+                        MessageBox.Show("Run Mode Changed to Sequence Mode", "Run mode", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        tabControl1.TabIndex = 1;
+                    }
+                    break;
+                case 3:
+                    Runmode = RobotRunMode.SequenceMode;
+                    MessageBox.Show("Run Mode Changed to External Run Mode", "Run mode", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    tabControl1.TabIndex = 3;
+                    cboxMoveMode.SelectedIndex = 3;
+                    break;
+            }
+            UpdateGUI();
+            lblRunMode.Text = Runmode.ToString();
+        }
+        private void frmKXMain_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            kinematix.Close();
+            Close();
+        }
+        private void btnConnectCam_Click(object sender, EventArgs e)
+        {
+            cam = new ObjectRecognizer((int)numCamCom.Value, ref imageBox);
+            cam.Capture.Start();
+        }
+        #endregion
+
+        #region JogMethods
+        private void pictureBox1_Paint(object sender, PaintEventArgs e)
+        {
+            if (joy.Open)
+            {
+                e.Graphics.Clear(Color.CornflowerBlue);
+
+                int X = (int)(joy.GetAxis(0) * 25);
+                int Y = (int)(joy.GetAxis(1) * 25);
+
+                int Z = (int)(joy.GetAxis(2) * 25);
+                int W = (int)(joy.GetAxis(3) * 25);
+
+                Rectangle rec = new Rectangle(X + 25, Y + 25, 50, 50);
+                e.Graphics.FillEllipse(Brushes.DarkGray, rec);
+                e.Graphics.DrawArc(Pens.Black, rec, 0, 360);
+
+                rec = new Rectangle(W + 150, Z + 25, 50, 50);
+                e.Graphics.FillEllipse(Brushes.DarkGray, rec);
+                e.Graphics.DrawArc(Pens.Black, rec, 0, 360);
+            }
+        }
+        private void tmrJogUpdater_Tick(object sender, EventArgs e)
+        {
+            if (kinematix != null)
+            {
+                if (kinematix.IsOpen)
+                {
+                    lblJogA1.Text = "A1: " + kinematix.AngleEncoders[0].ToString();
+                    lblJogA2.Text = "A2: " + kinematix.AngleEncoders[1].ToString();
+                    lblJogA3.Text = "A3: " + kinematix.AngleEncoders[2].ToString();
+                    lblJogA4.Text = "A4: " + kinematix.AngleEncoders[3].ToString();
+                    lblGripper.Text = !kinematix.GripperActivated ? "Gripper Opened" : "Gripper Closed";
+                    if(!chkUseJoy.Checked)
+                        TempAngleEncoders = kinematix.AngleEncoders.Clone() as int[];
+                }
+            }
+
+            if (joy.Open)
+            {
+                joy.Update();
+
+                if (joy.ButtonNewpress(4))
+                {
+                    chkGripper.Checked = !chkGripper.Checked;
+                }
+                if (joy.ButtonNewpress(10))
+                {
+                    chkUseJoy.Checked = !chkUseJoy.Checked;
+                }
+                if (joy.ButtonNewpress(3))
+                {
+                    if(!Sending)
+                        SendMove_Click(null,null);
+                }
+                if (joy.ButtonHeld(7))
+                {
+                    if (trackBar1.Value > 1)
+                        trackBar1.Value -= 1;
+                    else
+                        trackBar1.Value = 0;
+                }
+                if(joy.ButtonHeld(8))
+                {
+                    if (trackBar1.Value <= 49)
+                        trackBar1.Value += 1;
+                    else
+                        trackBar1.Value = 50;
+                }
+
+                pictureBox1.Image = new Bitmap(250, 100);
+
+                if (chkUseJoy.Checked)
+                {
+                    int X = (int)(joy.GetAxis(0) * trackBar1.Value);
+                    int Y = (int)(joy.GetAxis(1) * trackBar1.Value);
+
+                    int Z = (int)(joy.GetAxis(2) * trackBar1.Value);
+                    int W = (int)(joy.GetAxis(3) * trackBar1.Value);
+
+                    TempAngleEncoders[0] += X;
+                    TempAngleEncoders[1] += Y;
+
+                    TempAngleEncoders[2] += Z;
+                    TempAngleEncoders[3] += W;
+
+                    for (int i = 0; i < 4; i++)
+                    {
+                        if (TempAngleEncoders[i] < 0)
+                            TempAngleEncoders[i] = 0;
+                        if (TempAngleEncoders[i] > 1023)
+                            TempAngleEncoders[i] = 1023;
+                    }
+
+                    txtJogA1.Text = TempAngleEncoders[0].ToString();
+                    txtJogA2.Text = TempAngleEncoders[1].ToString();
+                    txtJogA3.Text = TempAngleEncoders[2].ToString();
+                    txtJogA4.Text = TempAngleEncoders[3].ToString();
+                }
+            }
+        }
+        private void SendMove_Click(object sender, EventArgs e)
+        {
+            Sending = true;
+            SendNewPos.Enabled = false;
+
+            string Comm = "";
+            Comm += txtJogA1.Text + ',';
+            Comm += txtJogA2.Text + ',';
+            Comm += txtJogA3.Text + ',';
+            Comm += txtJogA4.Text + ',';
+            Comm += chkGripper.Checked ? "1" : "0";
+            Comm += "m";
+
+            kinematix.Write(Comm);
+            System.Threading.Thread.Sleep(500);
+
+            SendNewPos.Enabled = true;
+            Sending = false;
+        }
+        private void btnSavePosition_Click(object sender, EventArgs e)
+        {
+            AddingPos = true;
+            string newrownum = dataGridView1.Rows.Count.ToString();
+            string[] row = {newrownum, 
+                            "Absolute",
+                            kinematix.AngleEncoders[0].ToString(),
+                            kinematix.AngleEncoders[1].ToString(),
+                            kinematix.AngleEncoders[2].ToString(),
+                            kinematix.AngleEncoders[3].ToString(),
+                            kinematix.GripperActivated.ToString()
+                           };
+
+            dataGridView1.Rows.Add(row);
+
+            AddingPos = false;
+        }
+        private void btnHome_Click(object sender, EventArgs e)
+        {
+            kinematix.SetHome(kinematix.AngleEncoders[0], 
+                              kinematix.AngleEncoders[1],
+                              kinematix.AngleEncoders[2],
+                              kinematix.AngleEncoders[3]);
+
+            MessageBox.Show("This position is a new home", "Homing Succesfull", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        #endregion
+
+        #region Sequence Methods
+        private void dataGridView1_RowsAdded(object sender, DataGridViewRowsAddedEventArgs e)
+        {
+            if (LoadingSeq)
+                return;
+
+            if (AddingPos)
+                return;
+
+            DataGridViewCell cell = dataGridView1.Rows[e.RowIndex - 1].Cells[0];
+            cell.Value = (dataGridView1.Rows.Count - 1).ToString();
+
+            cell = dataGridView1.Rows[e.RowIndex - 1].Cells[1];
+            cell.Value = "Absolute";
+        }
+        private void btnSaveSeq_Click(object sender, EventArgs e)
+        {
+            if(File.Exists("Positions.csv"))
+                File.Delete("Positions.csv");
+
+            using (StreamWriter writer = new StreamWriter("Positions.csv"))
+            {
+                foreach(DataGridViewRow row in dataGridView1.Rows)
+                {
+                    try
+                    {
+                        string posline = "";
+                        posline += row.Cells[0].Value.ToString() + ',';
+                        posline += row.Cells[1].Value.ToString() + ',';
+                        posline += row.Cells[2].Value.ToString() + ',';
+                        posline += row.Cells[3].Value.ToString() + ',';
+                        posline += row.Cells[4].Value.ToString() + ',';
+                        posline += row.Cells[5].Value.ToString() + ',';
+
+                        DataGridViewCheckBoxCell cell = row.Cells[6] as DataGridViewCheckBoxCell;
+                        if(cell.Value == null)
+                        {
+                            posline += "False";
+                        }
+                        else if(cell.Value.ToString().Contains("False"))
+                        {
+                            posline += "False";
+                        }
+                        else
+                        {
+                            posline += "True";
+                        }
+                        writer.WriteLine(posline);
+                    }
+                    catch(Exception eee) 
+                    {
+                    }
+                }
+                writer.Close();
+            }
+        }
+        private void btnLoadSeq_Click(object sender, EventArgs e)
+        {
+            if (!File.Exists("Positions.csv"))
+                return;
+
+            LoadingSeq = true;
+
+            dataGridView1.Rows.Clear();
+
+            string[] lines = File.ReadAllLines("Positions.csv");
+            foreach(string line in lines)
+            {
+                dataGridView1.Rows.Add(line.Split(','));
+            }
+
+            LoadingSeq = false;
+        }
+        private void btnClearSeq_Click(object sender, EventArgs e)
+        {
+            dataGridView1.Rows.Clear();
+        }
+        private void btnDeletePos_Click(object sender, EventArgs e)
+        {
+            foreach(DataGridViewRow row in dataGridView1.SelectedRows)
+            {
+                if (row.Index == dataGridView1.Rows.Count - 1)
+                    return;
+                dataGridView1.Rows.RemoveAt(row.Index);
+                break;
+            }
+        }
+        private void btnDuplicatePos_Click(object sender, EventArgs e)
+        {
+
+        }
+        private void btnMovePosition_Click(object sender, EventArgs e)
+        {
+            foreach (DataGridViewRow row in dataGridView1.SelectedRows)
+            {
+                if (row.Index == dataGridView1.Rows.Count - 1)
+                    return;
+                kinematix.PlayMove(row.Index);
+                break;
+            }
+        }
+        private void btnGoHome_Click(object sender, EventArgs e)
+        {
+            kinematix.GoHome();
+        }
+        #endregion
+
+        private void chkViewSpectra_CheckedChanged(object sender, EventArgs e)
+        {
+            if (chkObjShow.Checked && chkViewSpectra.Checked)
+                cam.imgMode = ImageModeObj.ThresholdedObj;
+            else if(chkObjShow.Checked)
+                cam.imgMode = ImageModeObj.Object;
+            else if(chkViewSpectra.Checked)
+                cam.imgMode = ImageModeObj.Thresholded;
+            else
+                cam.imgMode = ImageModeObj.Original;
+        }
+
+        private void numMin_ValueChanged(object sender, EventArgs e)
+        {
+            cam.SetMinVal((int)numHueMin.Value, (int)numSatMin.Value, (int)numValMin.Value);
+        }
+
+        private void numMax_ValueChanged(object sender, EventArgs e)
+        {
+            cam.SetMaxVal((int)numHueMax.Value, (int)numSatMax.Value, (int)numValMax.Value);
+        }
+
+    }
+}
+
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.IO.Ports;
+using System.Windows.Forms;
+
+namespace KinematiXRobot
+{
+    public enum RobotStatus
+    {
+        NoConnected,
+        Connected,
+        Ready,
+        Moving,
+        Error,
+        Done,
+    }
+    public enum RobotRunMode
+    {
+        Idle,
+        JogMode,
+        SequenceMode,
+        ExternalRun
+    }
+
+    public class KinematiXHandler : SerialPort
+    {
+        private Timer tmrReceiver;
+        private Timer tmrTimeOut;
+        private TextBox console;
+
+        private string readBuffer = "";
+        public RobotStatus Status = RobotStatus.NoConnected;
+        public int[] AngleEncoders = new int[6];
+        public bool GripperActivated = false;
+
+
+        public RobotMove HomePosition;
+        public List<RobotMove> Sequence;
+
+        public KinematiXHandler(string port, int baud, int timeOutInterval):base()
+        {
+            tmrReceiver = new Timer();
+            tmrReceiver.Interval = 100;
+            tmrReceiver.Tick += new System.EventHandler(this.ReceiveTimerHandler);
+
+            tmrTimeOut = new Timer();
+            tmrTimeOut.Interval = timeOutInterval;
+            tmrTimeOut.Tick += new System.EventHandler(this.TimeOutTimerHandler);
+            
+            Sequence = new List<RobotMove>();
+            SetHome(100, 200, 300, 400);
+
+            try
+            {
+                base.BaudRate = baud;
+                base.PortName = port;
+                base.ReadBufferSize = 32;
+
+                base.Open();
+                System.Threading.Thread.Sleep(1000);
+                tmrReceiver.Enabled = true;
+                //base.DataReceived += new System.IO.Ports.SerialDataReceivedEventHandler(this.ReceivePortHandler);
+            }
+            catch(Exception e)
+            {
+                MessageBox.Show(e.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Status = RobotStatus.Error;
+            }
+        }
+
+        #region Data Transfering
+        public void AddConsoleHandler(ref TextBox con)
+        {
+            console = con;
+        }
+        private void ReceiveTimerHandler(object sender,EventArgs e)
+        {
+            try
+            {
+                readBuffer = base.ReadLine();
+                
+                if(console != null)
+                {
+                    console.Text += readBuffer + Environment.NewLine;
+                    console.ScrollToCaret();
+                    if (console.Lines.Length > 40)
+                        console.Clear();
+                }
+
+                string[] splited = readBuffer.Split(',');
+                if (splited.Length < 5)
+                    return;
+
+                tmrReceiver.Stop();
+                tmrReceiver.Start();
+            
+                for (int i = 0; i < 5; i++)
+                    AngleEncoders[i] = Convert.ToInt32(splited[i]);
+
+                int tempStatus = Convert.ToInt32(splited[4]);
+                GripperActivated = (tempStatus & 0x01)>0;
+                switch (tempStatus>>1)
+                {
+                    case 0:
+                        Status = RobotStatus.Ready;
+                        break;
+                    case 1:
+                        Status = RobotStatus.Moving;
+                        break;
+                    case 2:
+                        Status = RobotStatus.Moving;
+                        break;
+                    case 3:
+                        Status = RobotStatus.Done;
+                        break;
+                    default:
+                        Status = RobotStatus.Error;
+                        break;
+                }
+            }
+            catch(Exception ex)
+            {
+                ex.ToString();
+            }
+            
+        }
+        private void TimeOutTimerHandler(object sender, EventArgs e)
+        {
+            base.Close();
+            MessageBox.Show("Robot Time out Connection", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            tmrReceiver.Enabled = false;
+        }
+        private void ReceivePortHandler(object sender, System.IO.Ports.SerialDataReceivedEventArgs e)
+        {
+            try
+            {
+                readBuffer = base.ReadLine();
+                
+            }
+            catch (Exception ex1)
+            { 
+            }
+
+        }
+        #endregion
+        #region Positioning
+        public void SetHome(int a1, int a2, int a3, int a4)
+        {
+            HomePosition = new RobotMove(RobotMoveType.Absolute);
+            HomePosition.SetPosition(a1,a2,a3,a4);
+            HomePosition.GripperActivated = false;
+        }
+
+        public void GoHome()
+        {
+            PlayMove(HomePosition);
+        }
+
+        public void PlayMove(int move)
+        {
+            PlayMove(Sequence[move]);
+        }
+
+        public void PlayMove(RobotMove move)
+        {
+            string command = move.GetCommand();
+            base.Write(command);
+            System.Threading.Thread.Sleep(500);
+        }
+
+        public void PlaySequence()
+        {
+
+        }
+
+        #endregion
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Drawing;
+using System.Windows.Forms;
+using Emgu.CV;
+using Emgu.CV.Structure;
+using Emgu.Util;
+using Emgu.CV.UI;
+using Emgu.CV.CvEnum;
+
+namespace VisionRecognition
+{
+    public class CameraHandler
+    {
+        public Capture Capture;
+
+        public Image<Bgr, Byte> Frame;
+        public bool CaptureInProgress;
+        public bool CaptureOpened = false;
+        protected ImageBox _viewer;
+
+        public CameraHandler(int numcapture, ref ImageBox viewer)
+        {
+            _viewer = viewer;
+            try
+            {
+                Capture = new Capture();
+                Capture.ImageGrabbed += ProcessFrame;
+                CaptureOpened = true;
+
+            }
+            catch (NullReferenceException excpt)
+            {
+                MessageBox.Show(excpt.Message);
+            }
+        }
+        public virtual void ProcessFrame(object sender, EventArgs arg)
+        {
+            Frame = Capture.RetrieveBgrFrame();
+            _viewer.Image = Frame;
+        }
+
+        /*
+        public Image<Gray, Byte> GetGrayImage()
+        {
+            Image<Bgr, Byte> smooth = Frame.SmoothGaussian(3, 3, 34.3, 45.3);
+            Image<Hsv, Byte> hsvImage = smooth.Convert<Hsv, Byte>();
+            Image<Gray, Byte> imgThresh = GetThresholdedImage(hsvImage);
+
+            MCvMoments moments = imgThresh.GetMoments(true);
+
+
+            PointF center = new PointF((float)moments.GravityCenter.x, (float)moments.GravityCenter.y);
+            CircleF circle = new CircleF(center,GetRadius(imgThresh, center));
+            Gray color = new Gray(185.0);
+            imgThresh.Draw(circle,color,3);
+            
+
+
+            return imgThresh;
+        }
+        public int GetRadius(Image<Gray, Byte> img, PointF center)
+        {
+            Bitmap bitmap = img.Bitmap;
+            int radius1 =0;
+            int radius2 = 0;
+            int radius3 = 0;
+            int radius4 = 0;
+            float x,y;
+            for(x = center.X; x<bitmap.Width; x+=4)
+            {
+                Color color = bitmap.GetPixel((int)x, (int)center.Y);
+                if (color.B > 128) radius1 += 4;
+            }
+            for (x = center.X; x > 0; x -= 4)
+            {
+                Color color = bitmap.GetPixel((int)x, (int)center.Y);
+                if (color.B > 128) radius2 += 4;
+            }
+            for (y = center.Y; y < bitmap.Height; y += 4)
+            {
+                Color color = bitmap.GetPixel((int)center.X, (int)y);
+                if (color.B > 128) radius3 += 4;
+            }
+            for (y = center.Y; y > 0; y -= 4)
+            {
+                Color color = bitmap.GetPixel((int)center.X, (int)y);
+                if (color.B > 128) radius4 += 4;
+            }
+            return (radius1 + radius2 + radius3 + radius4)/4;
+        }
+        private Image<Gray, Byte> GetThresholdedImage(Image<Hsv, Byte> imgHSV)
+        {
+            Image<Gray, Byte> imgThresh = new Image<Gray, Byte>(imgHSV.Width, imgHSV.Height);
+            imgThresh = imgHSV.InRange(new Hsv(90, 160, 30), new Hsv(130, 256, 256));
+            //imgThresh = imgHSV.InRange(new Hsv(0, 0, 120), new Hsv(180, 90, 256));
+            return imgThresh;
+        } */ 
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Drawing;
+using System.Windows.Forms;
+using Emgu.CV;
+using Emgu.CV.Structure;
+using Emgu.Util;
+using Emgu.CV.UI;
+using Emgu.CV.CvEnum;
+
+namespace VisionRecognition
+{
+    public enum ImageModeObj
+    {
+        Original,
+        Thresholded,
+        Object,
+        ThresholdedObj
+    }
+    public class ObjectRecognizer : CameraHandler
+    {
+        public ImageModeObj imgMode = ImageModeObj.Original;
+        private Hsv minVal;
+        private Hsv maxVal;
+        private int Radius;
+        PointF center;
+        CircleF circle;
+
+        public ObjectRecognizer(int numcapture, ref ImageBox viewer) : base(numcapture, ref viewer)
+        {
+
+        }
+
+        public void SetMinVal(int hue, int saturation, int value)
+        {
+            minVal = new Hsv(hue, saturation, value);
+        }
+        public void SetMaxVal(int hue, int saturation, int value)
+        {
+            maxVal = new Hsv(hue, saturation, value);
+        }
+        public override void ProcessFrame(object sender, EventArgs arg)
+        {
+            Frame = Capture.RetrieveBgrFrame();
+            switch (imgMode)
+            {
+                case ImageModeObj.Original:
+                    _viewer.Image = Frame;
+                    break;
+
+                case ImageModeObj.Thresholded:
+                    Image<Hsv, Byte> hsv = Frame.Convert<Hsv, Byte>();
+                    Image<Gray, Byte> range = GetThresholdedImage(hsv);
+                    _viewer.Image = range;
+                    break;
+                case ImageModeObj.Object:
+                    Image<Hsv, Byte> hsv1 = Frame.Convert<Hsv, Byte>();
+                    Image<Gray, Byte> range1 = GetThresholdedImage(hsv1);
+                    CalcPosition(range1);
+                    Frame.Draw(circle, new Bgr(Color.DarkGreen), 2);
+                    Frame.Draw(circle, new Bgr(Color.LightGreen), 1);
+                    _viewer.Image = Frame;
+                    break;
+
+                case ImageModeObj.ThresholdedObj:
+                    Image<Hsv, Byte> hsv2 = Frame.Convert<Hsv, Byte>();
+                    Image<Gray, Byte> range2 = GetThresholdedImage(hsv2);
+                    Image<Bgr, Byte> color = new Image<Bgr, Byte>(range2.Bitmap);
+                    CalcPosition(range2);
+                    color.Draw(circle, new Bgr(Color.DarkGreen), 2);
+                    color.Draw(circle, new Bgr(Color.LightGreen), 1);
+                    _viewer.Image = color;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        public void CalcPosition(Image<Gray, Byte> imgThresh)
+        {
+            MCvMoments moments = imgThresh.GetMoments(true);
+
+            center = new PointF((float)moments.GravityCenter.x, (float)moments.GravityCenter.y);
+            Radius = GetRadius(imgThresh, center);
+            circle = new CircleF(center, Radius);
+
+            //Gray color = new Gray(185.0);
+            //imgThresh.Draw(circle, color, 3);
+        }
+
+        public Image<Gray, Byte> GetGrayImage()
+        {
+            Image<Bgr, Byte> smooth = Frame.SmoothGaussian(3, 3, 34.3, 45.3);
+            Image<Hsv, Byte> hsvImage = smooth.Convert<Hsv, Byte>();
+            Image<Gray, Byte> imgThresh = GetThresholdedImage(hsvImage);
+
+            MCvMoments moments = imgThresh.GetMoments(true);
+
+            PointF center = new PointF((float)moments.GravityCenter.x, (float)moments.GravityCenter.y);
+            CircleF circle = new CircleF(center, GetRadius(imgThresh, center));
+            Gray color = new Gray(185.0);
+            imgThresh.Draw(circle, color, 3);
+
+            return imgThresh;
+        }
+
+        public int GetRadius(Image<Gray, Byte> img, PointF center)
+        {
+            Bitmap bitmap = img.Bitmap;
+            int radius1 = 0;
+            int radius2 = 0;
+            int radius3 = 0;
+            int radius4 = 0;
+            float x, y;
+            for (x = center.X; x < bitmap.Width; x += 4)
+            {
+                Color color = bitmap.GetPixel((int)x, (int)center.Y);
+                if (color.B > 128) radius1 += 4;
+            }
+            for (x = center.X; x > 0; x -= 4)
+            {
+                Color color = bitmap.GetPixel((int)x, (int)center.Y);
+                if (color.B > 128) radius2 += 4;
+            }
+            for (y = center.Y; y < bitmap.Height; y += 4)
+            {
+                Color color = bitmap.GetPixel((int)center.X, (int)y);
+                if (color.B > 128) radius3 += 4;
+            }
+            for (y = center.Y; y > 0; y -= 4)
+            {
+                Color color = bitmap.GetPixel((int)center.X, (int)y);
+                if (color.B > 128) radius4 += 4;
+            }
+            return (radius1 + radius2 + radius3 + radius4) / 4;
+        }
+        private Image<Gray, Byte> GetThresholdedImage(Image<Hsv, Byte> imgHSV)
+        {
+            Image<Gray, Byte> imgThresh = new Image<Gray, Byte>(imgHSV.Width, imgHSV.Height);
+            imgThresh = imgHSV.InRange(minVal, maxVal);
+            return imgThresh;
+        }
+        
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace KinematiXRobot
+{
+    public enum RobotMoveType
+    {
+        NoMove,
+        Absolute,
+        Relative,
+        LastCommanded,
+        Home
+    }
+    public class RobotMove
+    {
+        public RobotMoveType MoveType;
+        private int[] JointData = new int [4];
+        public bool GripperActivated = false;
+
+        #region Contructors
+        public RobotMove()
+        {
+        }
+
+        public RobotMove(RobotMoveType type)
+        {
+            MoveType = type;
+        }
+
+        public RobotMove(RobotMoveType type, int[] data)
+        {
+            MoveType = type;
+            JointData = data;
+        }
+
+        public RobotMove(DataGridViewRow row)
+        {
+            string moveType = row.Cells[1].Value.ToString();
+
+            if (moveType.Contains("Absolute"))
+                MoveType = RobotMoveType.Absolute;
+            else if (moveType.Contains("Relative"))
+                MoveType = RobotMoveType.Relative;
+            else if (moveType.Contains("Rel Last Commanded"))
+                MoveType = RobotMoveType.LastCommanded;
+            else if (moveType.Contains("Home"))
+                MoveType = RobotMoveType.Home;
+
+            JointData[0] = Convert.ToInt32(row.Cells[2].Value.ToString());
+            JointData[1] = Convert.ToInt32(row.Cells[3].Value.ToString());
+            JointData[2] = Convert.ToInt32(row.Cells[4].Value.ToString());
+            JointData[3] = Convert.ToInt32(row.Cells[5].Value.ToString());
+
+            DataGridViewCheckBoxCell cell = row.Cells[6] as DataGridViewCheckBoxCell;
+            if (cell.Value == null)
+                GripperActivated = false;
+            else if (cell.Value.ToString().Contains("False"))
+                GripperActivated = false;
+            else
+                GripperActivated = true;
+        }
+        #endregion
+
+        public void SetPosition(int A1, int A2, int A3, int A4)
+        {
+            JointData[0] = A1;
+            JointData[1] = A2;
+            JointData[2] = A3;
+            JointData[3] = A4;
+        }
+        public string GetCommand()
+        {
+            string ret = "";
+
+            ret += JointData[0].ToString() + ',';
+            ret += JointData[1].ToString() + ',';
+            ret += JointData[2].ToString() + ',';
+            ret += JointData[3].ToString() + ',';
+            ret += GripperActivated ? '1' : '0';
+            ret += 'm';
+            return ret; 
+        }
+
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace JoytickInterop
+{
+    public class SDLJoystick
+    {
+
+#if WIN64
+        public const string DLL_FILE_NAME = "SDL64.dll";
+#else
+        public const string DLL_FILE_NAME = "SDL.dll";
+#endif
+		#region Native Metods
+        [DllImport(DLL_FILE_NAME)]
+        public extern static int SDL_InitSubSystem(uint Flags);
+
+        [DllImport(DLL_FILE_NAME)]
+		public extern static int SDL_NumJoysticks();
+
+        [DllImport(DLL_FILE_NAME)]
+		public extern static void SDL_JoystickEventState(int Enable);
+
+        [DllImport(DLL_FILE_NAME)]
+		public extern static IntPtr SDL_JoystickOpen(int numJoystick);
+
+        [DllImport(DLL_FILE_NAME)]
+		public extern static void SDL_JoystickUpdate();
+
+        [DllImport(DLL_FILE_NAME)]
+		public extern static byte SDL_JoystickGetButton (IntPtr joystick, int button);
+
+        [DllImport(DLL_FILE_NAME)]
+		public extern static short SDL_JoystickGetAxis(IntPtr joystick, int Axis);
+
+        [DllImport(DLL_FILE_NAME, CharSet = CharSet.Ansi)]
+		public extern static string SDL_GetError();
+
+        [DllImport(DLL_FILE_NAME)]
+		public extern static int SDL_JoystickNumButtons (IntPtr joystick);
+
+        [DllImport(DLL_FILE_NAME, CharSet = CharSet.Ansi)]
+		public extern static string SDL_JoystickName (int joystick);
+
+		#endregion
+
+        #region Private Methods
+        protected bool Initialized; 
+		protected int NumButtons;
+		private IntPtr JoyHandle = IntPtr.Zero;
+		private UInt16[] mButtonHeld;
+		private UInt16[] mButtonNewpress;
+		private UInt16[] bButtonNewpress;
+        #endregion
+
+        public static int NumJoysticks = 0;
+        public bool Open = false;
+
+        public SDLJoystick()
+		{
+            try
+            {
+                if (SDL_InitSubSystem((uint)0x00000200) < 0)
+                {
+                    Console.WriteLine("Couldn't initializa SDL: " + SDL_GetError());
+                    Initialized = false;
+                }
+                else
+                {
+                    NumJoysticks = SDL_NumJoysticks();
+                    Console.WriteLine(NumJoysticks.ToString() + " joysticks were found.");
+                    /*int i;
+                    for( i=0; i < SDL_NumJoysticks(); i++ ) 
+                    {
+                        Console.WriteLine ( "  " + i.ToString() + ".-" +  SDL_JoystickName(i));
+                    }*/
+                    Initialized = true;
+                }
+            }
+            catch(Exception e)
+            {
+
+            }
+
+		}
+
+		public void InitJoystick(int numJoystick, int MaxButtons)
+		{
+			if (!Initialized)
+				return;
+			NumButtons = MaxButtons;
+			mButtonHeld = new UInt16[NumButtons];
+			mButtonNewpress = new UInt16[NumButtons];
+			bButtonNewpress = new UInt16[NumButtons];
+
+			SDL_JoystickEventState(1);
+			JoyHandle = SDL_JoystickOpen(numJoystick);
+
+			if (JoyHandle != IntPtr.Zero) 
+			{
+				Console.WriteLine("Joystick Opened");
+				Console.WriteLine("Num of Buttons " + SDL_JoystickNumButtons(JoyHandle).ToString());
+			}
+			else Console.WriteLine("Joystick NOT Opened");
+            Open = true;
+			Update ();
+		}
+		public void Update()
+		{
+			JoystickEvent();
+			int i;
+			for(i=0; i<NumButtons; i++)
+			{
+				//cout <<"Button" << i << ":: "<< mButtonHeld[i] <<endl;
+				if(mButtonHeld[i]==1)
+				{
+					//cout<< "Held "  << i <<endl;
+					if(bButtonNewpress[i]==1){
+						mButtonNewpress[i] = 0;
+						bButtonNewpress[i] = 1;
+						//cout<< "NewpressReyected "  << i <<endl;
+						//cout << "Button State : " <<  mButtonNewpress[i] << endl;
+					}
+					else 
+					{
+						mButtonNewpress[i] = 1;
+						bButtonNewpress[i] = 1;
+						//cout<< "NewpressDetected "  << i <<endl;
+						//cout << "Button State : " <<  mButtonNewpress[i] << endl;
+					}
+				}
+				else
+				{
+					bButtonNewpress[i] = 0;
+					mButtonNewpress[i] = 0;
+				}
+			}
+		}
+		private void JoystickEvent()
+		{
+			SDL_JoystickUpdate();
+
+			int i;
+			for (i=0; i<NumButtons; i++) 
+			{
+				mButtonHeld[i]=SDL_JoystickGetButton(JoyHandle,i);
+				//Console.WriteLine ("Button " + i.ToString () + "::" + mButtonHeld [i].ToString ());
+				//cout <<"Button" << i << ":: "<< button[i] <<endl;
+			}
+			//if(SDL_JoystickGetButton(joystick[numJoystick],0)==1)cout <<"Button 1 Presssed"<< endl;
+			//cout << "State: " << (int) SDL_JoystickGetHat(joystick[numJoystick], 0)<<endl;
+		}
+		public float GetAxis(short Axis)
+		{
+			float Value = (float)((float)SDL_JoystickGetAxis(JoyHandle, Axis)/32768.0f);
+            //Console.WriteLine(Value.ToString());
+			try
+			{
+				if (Math.Abs (Value) > 0.4)
+					return Value;
+				else
+					return 0.0f;
+			}
+			catch 
+			{
+				return 0.0f;
+			}
+		}
+
+		public bool ButtonHeld(short button)
+		{
+			if(button > NumButtons || button == 0)return false;
+			else 
+			{
+				if (mButtonHeld [button - 1] == 1)
+					return true;
+				else
+					return false;
+			}
+		}
+		public bool ButtonNewpress(short button)
+		{
+			if (button > NumButtons || button == 0)
+				return false;
+			else 
+			{
+				if (mButtonNewpress [button - 1] == 1)
+					return true;
+				else
+					return false;
+			}
+		}
+
+	}
+}
+
+
